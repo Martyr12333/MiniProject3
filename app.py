@@ -408,13 +408,14 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
         "You are the Data Fetcher. Follow the Plan-and-Solve protocol:\n"
         "Step 1 — UNDERSTAND: Read the original question and the tickers provided. "
         "Identify what data is needed (prices, fundamentals, news, market status).\n"
-        "Step 2 — PLAN: List which tools to call and in what order.\n"
+        "Step 2 — PLAN: List which tools to call and in what order. For example: "
+        "'Plan: (a) get_price_performance for [AAPL, MSFT] over 1y, (b) get_company_overview for each.'\n"
         "Step 3 — EXECUTE: Call the tools as planned.\n"
         "Step 4 — VERIFY: Check that all requested data was fetched. Report any errors encountered.\n\n"
         "Use conversation history to understand what data is being asked for."
     )
     task2 = f"{context_block}Current question: {question}\n\nTickers identified:\n{answer1}"
-    answer2, tools2 = _run_specialist(client, model, "Data Agent", sys2, task2, DATA_TOOLS, 8)
+    answer2, tools2 = _run_specialist(client, model, "Data Agent", sys2, task2, DATA_TOOLS, 6)
 
     sys3 = (
         "You are the Synthesizer. Follow the Plan-and-Solve protocol:\n"
