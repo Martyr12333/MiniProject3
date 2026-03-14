@@ -16,7 +16,16 @@ DB_PATH = os.path.join(BASE_DIR, "stocks.db")
 CSV_PATH = os.path.join(BASE_DIR, "sp500_companies.csv")
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "V81MWZ10Q78DTNC3")
+
+def _get_secret(key, default=""):
+    """Read from st.secrets (Streamlit Cloud) → env var → default."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.getenv(key, default)
+
+ALPHAVANTAGE_API_KEY = _get_secret("ALPHAVANTAGE_API_KEY", "V81MWZ10Q78DTNC3")
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
 
 
 # ── Database bootstrap ───────────────────────────────────────
@@ -252,12 +261,23 @@ DATA_TOOLS = [SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEM
 
 SINGLE_AGENT_PROMPT = (
     "You are a highly capable FinTech AI assistant with access to 7 live data tools.\n\n"
+    "For EVERY question, follow the Plan-and-Solve protocol:\n\n"
+    "Step 1 — UNDERSTAND: Parse the question. Identify the entities (tickers, sectors), "
+    "the metrics requested (price, P/E, sentiment), and the time period.\n\n"
+    "Step 2 — PLAN: Before calling any tool, state your plan explicitly. For example:\n"
+    '  "Plan: (a) look up Energy sector tickers via get_tickers_by_sector, '
+    '(b) fetch 1-year price performance for each, (c) rank by pct_change."\n\n'
+    "Step 3 — EXECUTE: Carry out the plan by calling tools in the order you planned. "
+    "Chain tools when needed — first resolve tickers (query_local_db / get_tickers_by_sector), "
+    "then fetch data (get_price_performance / get_company_overview / get_news_sentiment).\n\n"
+    "Step 4 — VERIFY & ANSWER: Review all tool outputs. Check for errors or missing data. "
+    "Then provide a clear, data-backed final answer.\n\n"
     "CRITICAL RULES:\n"
-    "1. For complex questions, chain your tools: first look up tickers, then fetch data.\n"
-    "2. Never fabricate data. If a tool returns an error, say so.\n"
-    "3. Use the conversation history to resolve pronouns and follow-up references "
+    "- Never fabricate data. If a tool returns an error, say so.\n"
+    "- Always state your plan BEFORE making tool calls.\n"
+    "- Use conversation history to resolve pronouns and follow-up references "
     "(e.g. 'that company', 'how does it compare', 'which of the two').\n"
-    "4. When the user asks a follow-up, do NOT repeat the full prior answer — "
+    "- When the user asks a follow-up, do NOT repeat the full prior answer — "
     "answer the new question directly, referencing prior context as needed.\n"
 )
 
@@ -371,25 +391,37 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
         )
 
     sys1 = (
-        "You are the Database Specialist. Find the relevant tickers for the user's question "
-        "using the local database. The `stocks` table ONLY has: ticker, company, sector, "
-        "industry, market_cap, exchange. Do NOT query for price or returns in SQL. "
+        "You are the Database Specialist. Follow the Plan-and-Solve protocol:\n"
+        "Step 1 — UNDERSTAND: Identify which tickers, sectors, or industries the question refers to.\n"
+        "Step 2 — PLAN: Decide whether to use get_tickers_by_sector (broad sector lookup) "
+        "or query_local_db (specific SQL). State your plan.\n"
+        "Step 3 — EXECUTE: Run your planned queries.\n"
+        "Step 4 — VERIFY: Confirm you found relevant tickers. If none found, try an alternative query.\n\n"
+        "IMPORTANT: The `stocks` table ONLY has columns: ticker, company, sector, industry, "
+        "market_cap, exchange. Do NOT query for price or returns in SQL. "
         "Use conversation history to resolve any follow-up references."
     )
     task1 = f"{context_block}Current question: {question}"
     answer1, tools1 = _run_specialist(client, model, "DB Agent", sys1, task1, DB_TOOLS, 4)
 
     sys2 = (
-        "You are the Data Fetcher. Using the tickers identified by the previous agent, "
-        "fetch the requested financial data (prices, fundamentals, sentiment). "
+        "You are the Data Fetcher. Follow the Plan-and-Solve protocol:\n"
+        "Step 1 — UNDERSTAND: Read the original question and the tickers provided. "
+        "Identify what data is needed (prices, fundamentals, news, market status).\n"
+        "Step 2 — PLAN: List which tools to call and in what order.\n"
+        "Step 3 — EXECUTE: Call the tools as planned.\n"
+        "Step 4 — VERIFY: Check that all requested data was fetched. Report any errors encountered.\n\n"
         "Use conversation history to understand what data is being asked for."
     )
     task2 = f"{context_block}Current question: {question}\n\nTickers identified:\n{answer1}"
     answer2, tools2 = _run_specialist(client, model, "Data Agent", sys2, task2, DATA_TOOLS, 8)
 
     sys3 = (
-        "You are the Synthesizer. Review the collected data and answer the user's question "
-        "clearly and concisely. Do NOT fabricate numbers. "
+        "You are the Synthesizer. Follow the Plan-and-Solve protocol:\n"
+        "Step 1 — UNDERSTAND: Re-read the original question to know exactly what is being asked.\n"
+        "Step 2 — PLAN: Outline how to structure your answer (e.g., ranking, comparison table, summary).\n"
+        "Step 3 — EXECUTE: Write the answer using ONLY the collected data. Do NOT fabricate numbers.\n"
+        "Step 4 — VERIFY: Cross-check your answer against the data. Flag any gaps or missing information.\n\n"
         "Use conversation history for context on follow-up questions."
     )
     task3 = f"{context_block}Current question: {question}\n\nCollected Data:\n{answer2}"
@@ -442,9 +474,8 @@ with st.sidebar:
     )
 
 # ── Validate prerequisites ───────────────────────────────────
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 if not OPENAI_API_KEY:
-    st.warning("Please set OPENAI_API_KEY in your .env file or pass it as an environment variable.")
+    st.warning("OpenAI API Key not found. Please set it in Streamlit Secrets or as an environment variable.")
     st.stop()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
