@@ -429,15 +429,6 @@ with st.sidebar:
 
     st.divider()
 
-    api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        value=os.getenv("OPENAI_API_KEY", ""),
-        help="Leave empty to use the key from .env",
-    )
-
-    st.divider()
-
     if st.button("🗑️ Clear Conversation", use_container_width=True):
         st.session_state.messages = []
         st.session_state.conversation_pairs = []
@@ -451,12 +442,12 @@ with st.sidebar:
     )
 
 # ── Validate prerequisites ───────────────────────────────────
-effective_key = api_key or os.getenv("OPENAI_API_KEY", "")
-if not effective_key:
-    st.warning("Please enter your OpenAI API Key in the sidebar, or set OPENAI_API_KEY in a .env file.")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+if not OPENAI_API_KEY:
+    st.warning("Please set OPENAI_API_KEY in your .env file or pass it as an environment variable.")
     st.stop()
 
-client = OpenAI(api_key=effective_key)
+client = OpenAI(api_key=OPENAI_API_KEY)
 ensure_database()
 
 # ── Main chat area ───────────────────────────────────────────
