@@ -255,6 +255,48 @@ DB_TOOLS = [SCHEMA_TICKERS, SCHEMA_SQL]
 DATA_TOOLS = [SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS]
 
 
+# ── Confidence scoring ────────────────────────────────────────
+def _compute_confidence(answer, tools_called, raw_data, tool_schemas, reached_max):
+    """Score confidence 0.0-1.0 based on tool execution quality."""
+    issues = []
+    if reached_max:
+        issues.append("Hit max iterations without final answer")
+        return 0.20, issues
+    if not answer or not answer.strip():
+        issues.append("Empty answer")
+        return 0.10, issues
+
+    score = 1.0
+
+    error_count = 0
+    for name, data in raw_data.items():
+        if isinstance(data, dict) and "error" in data:
+            error_count += 1
+            issues.append(f"Tool '{name}' returned an error")
+        elif isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, dict) and "error" in v:
+                    error_count += 1
+                    issues.append(f"Tool '{name}' had partial errors")
+                    break
+    if error_count:
+        score -= 0.15 * error_count
+
+    if tool_schemas and not tools_called:
+        score -= 0.10
+        issues.append("No tools called despite tools being available")
+
+    lower = answer.lower()
+    failure_phrases = ["unable to retrieve", "could not retrieve", "data not available",
+                       "no data found", "i don't have access", "cannot find any"]
+    hits = [p for p in failure_phrases if p in lower]
+    if hits:
+        score -= 0.15 * min(len(hits), 2)
+        issues.append(f"Answer indicates data retrieval failure: {', '.join(hits[:3])}")
+
+    return max(round(score, 2), 0.05), issues
+
+
 # ══════════════════════════════════════════════════════════════
 #  Agent loops with conversational memory
 # ══════════════════════════════════════════════════════════════
@@ -310,28 +352,32 @@ def _build_history_text(conversation_pairs):
 def run_single_agent_with_memory(client, model, question, conversation_pairs):
     """
     Single-agent loop that carries conversation history as prior messages.
-    Returns (answer_text, tools_called_list).
+    Returns (answer_text, tools_called_list, confidence, issues).
     """
     messages = [{"role": "system", "content": SINGLE_AGENT_PROMPT}]
     messages.extend(_build_history_messages(conversation_pairs))
     messages.append({"role": "user", "content": question})
 
     tools_called = []
+    raw_data = {}
 
-    for _ in range(12):
+    for _ in range(20):
         kwargs = {"model": model, "messages": messages, "tools": ALL_SCHEMAS}
         resp = client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
         messages.append(msg)
 
         if not msg.tool_calls:
-            return msg.content or "", tools_called
+            answer = msg.content or ""
+            conf, issues = _compute_confidence(answer, tools_called, raw_data, ALL_SCHEMAS, reached_max=False)
+            return answer, tools_called, conf, issues
 
         for tc in msg.tool_calls:
             fname = tc.function.name
             tools_called.append(fname)
             args = json.loads(tc.function.arguments)
             result = ALL_TOOL_FUNCTIONS[fname](**args)
+            raw_data[fname] = result
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -339,16 +385,20 @@ def run_single_agent_with_memory(client, model, question, conversation_pairs):
                 "content": json.dumps(result),
             })
 
-    return "Max iterations reached without a final answer.", tools_called
+    conf, issues = _compute_confidence("", tools_called, raw_data, ALL_SCHEMAS, reached_max=True)
+    return "Max iterations reached without a final answer.", tools_called, conf, issues
 
 
 def _run_specialist(client, model, agent_name, system_prompt, task, tool_schemas, max_iters=6):
-    """Stateless specialist loop (used inside multi-agent pipeline)."""
+    """Stateless specialist loop (used inside multi-agent pipeline).
+    Returns (answer, tools_called, confidence, issues).
+    """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
     ]
     tools_called = []
+    raw_data = {}
 
     for _ in range(max_iters):
         kwargs = {"model": model, "messages": messages}
@@ -359,13 +409,16 @@ def _run_specialist(client, model, agent_name, system_prompt, task, tool_schemas
         messages.append(msg)
 
         if not msg.tool_calls:
-            return msg.content or "", tools_called
+            answer = msg.content or ""
+            conf, issues = _compute_confidence(answer, tools_called, raw_data, tool_schemas, reached_max=False)
+            return answer, tools_called, conf, issues
 
         for tc in msg.tool_calls:
             fname = tc.function.name
             tools_called.append(fname)
             args = json.loads(tc.function.arguments)
             result = ALL_TOOL_FUNCTIONS[fname](**args)
+            raw_data[fname] = result
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -373,14 +426,15 @@ def _run_specialist(client, model, agent_name, system_prompt, task, tool_schemas
                 "content": json.dumps(result),
             })
 
-    return "Max iterations reached.", tools_called
+    conf, issues = _compute_confidence("", tools_called, raw_data, tool_schemas, reached_max=True)
+    return "Max iterations reached.", tools_called, conf, issues
 
 
 def run_multi_agent_with_memory(client, model, question, conversation_pairs):
     """
     Sequential-pipeline multi-agent: DB Agent -> Data Agent -> Synthesizer.
     Conversation history is injected as textual context.
-    Returns (answer_text, tools_called_list, agents_activated).
+    Returns (answer_text, tools_called_list, agents_activated, confidence, issue_count).
     """
     history_text = _build_history_text(conversation_pairs)
     context_block = ""
@@ -402,7 +456,7 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
         "Use conversation history to resolve any follow-up references."
     )
     task1 = f"{context_block}Current question: {question}"
-    answer1, tools1 = _run_specialist(client, model, "DB Agent", sys1, task1, DB_TOOLS, 4)
+    answer1, tools1, conf1, issues1 = _run_specialist(client, model, "DB Agent", sys1, task1, DB_TOOLS, 4)
 
     sys2 = (
         "You are the Data Fetcher. Follow the Plan-and-Solve protocol:\n"
@@ -415,7 +469,7 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
         "Use conversation history to understand what data is being asked for."
     )
     task2 = f"{context_block}Current question: {question}\n\nTickers identified:\n{answer1}"
-    answer2, tools2 = _run_specialist(client, model, "Data Agent", sys2, task2, DATA_TOOLS, 6)
+    answer2, tools2, conf2, issues2 = _run_specialist(client, model, "Data Agent", sys2, task2, DATA_TOOLS, 6)
 
     sys3 = (
         "You are the Synthesizer. Follow the Plan-and-Solve protocol:\n"
@@ -426,11 +480,28 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
         "Use conversation history for context on follow-up questions."
     )
     task3 = f"{context_block}Current question: {question}\n\nCollected Data:\n{answer2}"
-    answer3, _ = _run_specialist(client, model, "Synthesizer", sys3, task3, [], 2)
+    answer3, _, conf3, issues3 = _run_specialist(client, model, "Synthesizer", sys3, task3, [], 2)
+
+    # Pipeline-level verification: adjust confidence based on upstream quality
+    pipeline_penalty = 0.0
+    serious_keywords = ["error", "returned an error", "partial errors", "retrieval failure"]
+    upstream_errors = [iss for iss in issues1 + issues2
+                       if any(k in iss.lower() for k in serious_keywords)]
+    if upstream_errors:
+        pipeline_penalty += 0.10
+
+    lower = answer3.lower()
+    failure_phrases = ["unable to retrieve", "could not retrieve", "data not available",
+                       "no data found", "cannot find any"]
+    if any(p in lower for p in failure_phrases):
+        pipeline_penalty += 0.15
+
+    final_confidence = max(round(conf3 - pipeline_penalty, 2), 0.05)
+    all_issues = issues1 + issues2 + issues3
 
     all_tools = tools1 + tools2
     agents = ["DB Agent", "Data Agent", "Synthesizer"]
-    return answer3, all_tools, agents
+    return answer3, all_tools, agents, final_confidence, len(all_issues)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -491,11 +562,12 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
         if msg["role"] == "assistant" and msg.get("meta"):
             m = msg["meta"]
-            cols = st.columns(3)
-            cols[0].caption(f"🤖 Architecture: {m.get('agent_type', '')}")
-            cols[1].caption(f"🧠 Model: {m.get('model', '')}")
+            cols = st.columns(4)
+            cols[0].caption(f"🤖 {m.get('agent_type', '')}")
+            cols[1].caption(f"🧠 {m.get('model', '')}")
+            cols[2].caption(f"📊 Confidence: {m.get('confidence', 0):.0%}")
             if m.get("tools_used"):
-                cols[2].caption(f"🔧 Tools: {', '.join(m['tools_used'])}")
+                cols[3].caption(f"🔧 {', '.join(m['tools_used'])}")
 
 # ── Handle new input ─────────────────────────────────────────
 if prompt := st.chat_input("Ask a question…"):
@@ -508,13 +580,14 @@ if prompt := st.chat_input("Ask a question…"):
             t0 = time.time()
             try:
                 if agent_mode == "Single Agent":
-                    answer, tools_used = run_single_agent_with_memory(
+                    answer, tools_used, confidence, issues = run_single_agent_with_memory(
                         client, model_choice, prompt,
                         st.session_state.conversation_pairs,
                     )
                     agents_activated = ["Single Agent"]
+                    issue_count = len(issues)
                 else:
-                    answer, tools_used, agents_activated = run_multi_agent_with_memory(
+                    answer, tools_used, agents_activated, confidence, issue_count = run_multi_agent_with_memory(
                         client, model_choice, prompt,
                         st.session_state.conversation_pairs,
                     )
@@ -526,6 +599,8 @@ if prompt := st.chat_input("Ask a question…"):
                 )
                 tools_used = []
                 agents_activated = []
+                confidence = 0.0
+                issue_count = 0
                 elapsed = 0
 
         st.markdown(answer)
@@ -536,13 +611,16 @@ if prompt := st.chat_input("Ask a question…"):
             "tools_used": list(dict.fromkeys(tools_used)),
             "agents": agents_activated,
             "elapsed": elapsed,
+            "confidence": confidence,
+            "issue_count": issue_count,
         }
 
-        cols = st.columns(3)
-        cols[0].caption(f"🤖 Architecture: {agent_mode}")
-        cols[1].caption(f"🧠 Model: {model_choice}")
+        cols = st.columns(4)
+        cols[0].caption(f"🤖 {agent_mode}")
+        cols[1].caption(f"🧠 {model_choice}")
+        cols[2].caption(f"📊 Confidence: {confidence:.0%}")
         if tools_used:
-            cols[2].caption(f"🔧 Tools: {', '.join(dict.fromkeys(tools_used))}")
+            cols[3].caption(f"🔧 {', '.join(dict.fromkeys(tools_used))}")
 
     st.session_state.messages.append({
         "role": "assistant",
