@@ -303,20 +303,21 @@ def _compute_confidence(answer, tools_called, raw_data, tool_schemas, reached_ma
 
 SINGLE_AGENT_PROMPT = (
     "You are a highly capable FinTech AI assistant with access to 7 live data tools.\n\n"
-    "For EVERY question, follow the Plan-and-Solve protocol:\n\n"
-    "Step 1 — UNDERSTAND: Parse the question. Identify the entities (tickers, sectors), "
+    "For EVERY question, internally follow the Plan-and-Solve protocol:\n\n"
+    "1. UNDERSTAND: Parse the question. Identify the entities (tickers, sectors), "
     "the metrics requested (price, P/E, sentiment), and the time period.\n\n"
-    "Step 2 — PLAN: Before calling any tool, state your plan explicitly. For example:\n"
-    '  "Plan: (a) look up Energy sector tickers via get_tickers_by_sector, '
-    '(b) fetch 1-year price performance for each, (c) rank by pct_change."\n\n'
-    "Step 3 — EXECUTE: Carry out the plan by calling tools in the order you planned. "
+    "2. PLAN: Before calling any tool, decide your plan. For example: "
+    "look up Energy sector tickers via get_tickers_by_sector, "
+    "fetch 1-year price performance for each, rank by pct_change.\n\n"
+    "3. EXECUTE: Carry out the plan by calling tools in the order you planned. "
     "Chain tools when needed — first resolve tickers (query_local_db / get_tickers_by_sector), "
     "then fetch data (get_price_performance / get_company_overview / get_news_sentiment).\n\n"
-    "Step 4 — VERIFY & ANSWER: Review all tool outputs. Check for errors or missing data. "
+    "4. VERIFY & ANSWER: Review all tool outputs. Check for errors or missing data. "
     "Then provide a clear, data-backed final answer.\n\n"
     "CRITICAL RULES:\n"
     "- Never fabricate data. If a tool returns an error, say so.\n"
-    "- Always state your plan BEFORE making tool calls.\n"
+    "- Do NOT expose your internal reasoning steps (Step 1/2/3/4, Plan, etc.) in "
+    "your final answer to the user. Only present the final, polished answer.\n"
     "- Use conversation history to resolve pronouns and follow-up references "
     "(e.g. 'that company', 'how does it compare', 'which of the two').\n"
     "- When the user asks a follow-up, do NOT repeat the full prior answer — "
@@ -445,12 +446,13 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
         )
 
     sys1 = (
-        "You are the Database Specialist. Follow the Plan-and-Solve protocol:\n"
-        "Step 1 — UNDERSTAND: Identify which tickers, sectors, or industries the question refers to.\n"
-        "Step 2 — PLAN: Decide whether to use get_tickers_by_sector (broad sector lookup) "
-        "or query_local_db (specific SQL). State your plan.\n"
-        "Step 3 — EXECUTE: Run your planned queries.\n"
-        "Step 4 — VERIFY: Confirm you found relevant tickers. If none found, try an alternative query.\n\n"
+        "You are the Database Specialist. Internally follow this protocol:\n"
+        "1. UNDERSTAND: Identify which tickers, sectors, or industries the question refers to.\n"
+        "2. PLAN: Decide whether to use get_tickers_by_sector (broad sector lookup) "
+        "or query_local_db (specific SQL).\n"
+        "3. EXECUTE: Run your planned queries.\n"
+        "4. VERIFY: Confirm you found relevant tickers. If none found, try an alternative query.\n\n"
+        "Do NOT expose step labels or internal reasoning in your response.\n"
         "IMPORTANT: The `stocks` table ONLY has columns: ticker, company, sector, industry, "
         "market_cap, exchange. Do NOT query for price or returns in SQL. "
         "Use conversation history to resolve any follow-up references."
@@ -459,24 +461,26 @@ def run_multi_agent_with_memory(client, model, question, conversation_pairs):
     answer1, tools1, conf1, issues1 = _run_specialist(client, model, "DB Agent", sys1, task1, DB_TOOLS, 4)
 
     sys2 = (
-        "You are the Data Fetcher. Follow the Plan-and-Solve protocol:\n"
-        "Step 1 — UNDERSTAND: Read the original question and the tickers provided. "
+        "You are the Data Fetcher. Internally follow this protocol:\n"
+        "1. UNDERSTAND: Read the original question and the tickers provided. "
         "Identify what data is needed (prices, fundamentals, news, market status).\n"
-        "Step 2 — PLAN: List which tools to call and in what order. For example: "
-        "'Plan: (a) get_price_performance for [AAPL, MSFT] over 1y, (b) get_company_overview for each.'\n"
-        "Step 3 — EXECUTE: Call the tools as planned.\n"
-        "Step 4 — VERIFY: Check that all requested data was fetched. Report any errors encountered.\n\n"
+        "2. PLAN: Decide which tools to call and in what order.\n"
+        "3. EXECUTE: Call the tools as planned.\n"
+        "4. VERIFY: Check that all requested data was fetched. Report any errors encountered.\n\n"
+        "Do NOT expose step labels or internal reasoning in your response.\n"
         "Use conversation history to understand what data is being asked for."
     )
     task2 = f"{context_block}Current question: {question}\n\nTickers identified:\n{answer1}"
     answer2, tools2, conf2, issues2 = _run_specialist(client, model, "Data Agent", sys2, task2, DATA_TOOLS, 6)
 
     sys3 = (
-        "You are the Synthesizer. Follow the Plan-and-Solve protocol:\n"
-        "Step 1 — UNDERSTAND: Re-read the original question to know exactly what is being asked.\n"
-        "Step 2 — PLAN: Outline how to structure your answer (e.g., ranking, comparison table, summary).\n"
-        "Step 3 — EXECUTE: Write the answer using ONLY the collected data. Do NOT fabricate numbers.\n"
-        "Step 4 — VERIFY: Cross-check your answer against the data. Flag any gaps or missing information.\n\n"
+        "You are the Synthesizer. Internally follow this protocol:\n"
+        "1. UNDERSTAND: Re-read the original question to know exactly what is being asked.\n"
+        "2. PLAN: Outline how to structure your answer (e.g., ranking, comparison table, summary).\n"
+        "3. EXECUTE: Write the answer using ONLY the collected data. Do NOT fabricate numbers.\n"
+        "4. VERIFY: Cross-check your answer against the data. Flag any gaps or missing information.\n\n"
+        "Do NOT expose step labels or internal reasoning in your response. "
+        "Only present the final, polished answer.\n"
         "Use conversation history for context on follow-up questions."
     )
     task3 = f"{context_block}Current question: {question}\n\nCollected Data:\n{answer2}"
