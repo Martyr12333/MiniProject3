@@ -302,7 +302,7 @@ def _compute_confidence(answer, tools_called, raw_data, tool_schemas, reached_ma
 # ══════════════════════════════════════════════════════════════
 
 SINGLE_AGENT_PROMPT = (
-    "You are a highly capable FinTech AI assistant with access to 7 live data tools.\n\n"
+    "You are a highly capable FinTech AI with access to 7 live data tools.\n\n"
     "For EVERY question, internally follow the Plan-and-Solve protocol:\n\n"
     "1. UNDERSTAND: Parse the question. Identify the entities (tickers, sectors), "
     "the metrics requested (price, P/E, sentiment), and the time period.\n\n"
@@ -390,7 +390,7 @@ def run_single_agent_with_memory(client, model, question, conversation_pairs):
     return "Max iterations reached without a final answer.", tools_called, conf, issues
 
 
-def _run_specialist(client, model, agent_name, system_prompt, task, tool_schemas, max_iters=6):
+def _run_specialist(client, model, agent_name, system_prompt, task, tool_schemas, max_iters=8):
     """Stateless specialist loop (used inside multi-agent pipeline).
     Returns (answer, tools_called, confidence, issues).
     """
